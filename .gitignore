@@ -1,3 +1,6 @@
 logs
 .idea
 __pycache__
+vae.py
+vqvae.py
+datasets/

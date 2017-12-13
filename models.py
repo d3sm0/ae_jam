@@ -4,6 +4,9 @@ import numpy as np
 
 
 class Autoencoder(object):
+    def __init__(self):
+        self.global_step = tf.train.get_or_create_global_step()
+
     def _init_ph(self, obs_dim):
         self.x = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
 
@@ -36,8 +39,44 @@ class Autoencoder(object):
         return x_hat, h_hat
 
 
+
+class VAE(Autoencoder):
+    def __init__(self, obs_dim, h_size, n_p=2, act=tf.nn.elu, lr=1e-3):
+        self.n_p = n_p
+        self._init_ph(obs_dim=obs_dim)
+        self._build_graph(h_size=h_size, act=act)
+        self._train_op(lr=lr)
+        pass
+
+    def _build_graph(self, h_size, act, scope="vae"):
+        x = self.x
+        with tf.variable_scope(scope):
+            with tf.variable_scope("encoder"):
+                h = tf.layers.dense(inputs=x, units=h_size, activation=act)
+                self.p_mu = tf.layers.dense(inputs=h, units=self.n_p, activation=None)
+                self.p_log_sigma_sq = tf.layers.dense(inputs=h, units=self.n_p, activation=None)
+                eps = tf.random_normal(shape=tf.shape(self.p_mu), mean=0, stddev=1, dtype=tf.float32)
+                self.p = self.p_mu + tf.multiply(tf.sqrt(tf.exp(self.p_log_sigma_sq)), eps)
+            with tf.variable_scope("decoder"):
+                self.x_hat = tf.layers.dense(inputs=self.p, units=x.get_shape()[1], activation=tf.nn.sigmoid)
+
+    def _train_op(self, lr):
+        eps = 1e-10
+        entropy = -tf.reduce_sum(
+            self.x * tf.log(eps + self.x_hat) + (1 - self.x) * tf.log(eps + 1 - self.x_hat), axis=-1
+        )
+        self.entropy = tf.reduce_mean(entropy)
+        # p is the noise distribution and z is N(0,1)
+        kl_p_z = - 0.5 * tf.reduce_sum(
+            1 + self.p_log_sigma_sq - tf.square(self.p_mu) - tf.exp(self.p_log_sigma_sq)
+            , axis=-1)
+        self.kl_p_z = tf.reduce_mean(kl_p_z)
+        self.loss = self.entropy + self.kl_p_z
+        self.train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(self.loss)
+
+
 class AE(Autoencoder):
-    def __init__(self, obs_dim, h_size, act=tf.nn.sigmoid, lr= 1e-2):
+    def __init__(self, obs_dim, h_size, act=tf.nn.sigmoid, lr=1e-2):
         # super().__init__(self, obs_dim, h_size, act, lr)
         self._init_ph(obs_dim=obs_dim)
         self._build_graph(h_size, act, scope="AE")
@@ -232,3 +271,68 @@ class Corruptor(object):
             return x_max
         else:
             return x_min
+
+class VQVAE(object):
+    def __init__(self, obs_dim, h_size, e_dims=(64, 5), act=tf.nn.relu, lr=1e-2, beta=.25):
+        self.dict_size, self.k_dim = e_dims
+        self.beta = beta
+        self.global_step = tf.train.get_or_create_global_step()
+        self._init_ph(obs_dim= obs_dim)
+        self._build_graph(h_size=h_size, act=act, scope="vqvae")
+        self._train_op(lr=lr)
+
+    def _init_ph(self, obs_dim):
+        self.x = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
+
+    def _build_graph(self, h_size, act, scope="autoencoder"):
+        x = self.x
+        with tf.variable_scope(scope):
+            with tf.variable_scope("embeddings"):
+                self.e = tf.get_variable("embeddings", shape=[self.k_dim, self.dict_size],
+                                         initializer=tf.random_normal_initializer(.1))
+            with tf.variable_scope("encoder"):
+                self.z_e = tf.layers.dense(inputs=x, units=h_size, activation=act)
+                # batch_size, latent_h, latent_w, K, D
+                # D: dictionary size and K dim of the latent space
+                z_e = tf.tile(tf.expand_dims(self.z_e, -2), [1,  self.k_dim, 1])
+                # embbedding
+                e = tf.reshape(self.e, [1 , self.k_dim, self.dict_size])
+                k = tf.argmin(tf.norm(z_e - e, axis=-1), axis=-1)  # [latent_h, latent_w, D]
+                self.z_q = tf.gather(self.e, k)
+            with tf.variable_scope("decoder"):
+                # p_x_z
+                self.p_x_z = tf.layers.dense(inputs=self.z_q, units=x.get_shape()[1], activation=tf.nn.sigmoid)
+        pass
+
+    def _train_op(self, lr):
+        self.vq_loss = tf.reduce_mean(tf.stop_gradient(self.z_e) - self.z_q) ** 2
+        self.commit_loss = tf.reduce_mean(tf.norm(self.z_e - tf.stop_gradient(self.z_q)) ** 2)
+        # elf.neg_log- (tf.log(self.x_hat + 1e-5) - tf.log(1/tf.cast(self.k_dim, tf.float32)))
+        self.recon_loss = tf.reduce_mean(tf.square(self.p_x_z- self.x))
+        #
+        # should do all dimension [1,2,3]
+        self.recon_loss = - (tf.reduce_mean(tf.log(self.p_x_z)) - tf.log(tf.cast(self.k_dim, tf.float32)))
+        self.loss = self.recon_loss + self.vq_loss + self.beta * self.commit_loss
+
+        decoder_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "vqvae/decoder")
+        encoder_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "vqvae/encoder")
+
+        dec_grads = tf.gradients(self.recon_loss, decoder_params)
+        dec_gvs = list(zip(dec_grads, decoder_params))
+        embed_grads = tf.gradients(self.vq_loss, self.e)
+        embed_gvs = list(zip(embed_grads, [self.e]))
+
+        grad_z = tf.gradients(self.recon_loss, self.z_q)
+        enc_grads = []
+        # this can be written using add_n
+        for param in encoder_params:
+            g = tf.gradients(self.z_e, param, grad_z)[0] + tf.gradients(self.commit_loss, param)[0]
+            enc_grads.append(g)
+
+        # enc_grads = tf.gradients(self.recon_loss + self.beta * self.commit_loss, encoder_params)
+        enc_gvs = list(zip(enc_grads, encoder_params))
+
+        self.train_op = tf.train.AdamOptimizer(learning_rate=lr).apply_gradients(
+            dec_gvs + enc_gvs + embed_gvs, global_step=self.global_step
+        )
+
