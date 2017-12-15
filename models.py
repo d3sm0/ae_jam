@@ -3,56 +3,93 @@ import tensorflow as tf
 import numpy as np
 
 
+class Config(object):
+    batch_size = 64
+    train_steps = 10000
+    log_path = "logs/"
+    lr = 1e-2
+    clip = 40.
+    optim = tf.train.AdamOptimizer
+    act = tf.nn.relu
+    n_layers = 2
+    topology = {"type": ["linear", [64, 128]], "cnn": ["lol"]}
+    eps = 1e-10
+    # stacked AE
+    n_ae = 2
+    # VAE
+    n_z = 2
+    # VQVAE
+    beta = 0.25
+    # DAE
+    noise_type = "zeros"
+    drop_prob = .8
+    # RAE
+    sparsity_level = .5
+
+
 class Autoencoder(object):
-    def __init__(self):
+    def __init__(self, config, scope="autoencoder"):
+        self.scope = scope
+        self.batch_size = config.batch_size
+        self._optim = config.optim
+        self._act = config.act
+        self._lr = config.lr
         self.global_step = tf.train.get_or_create_global_step()
 
     def _init_ph(self, obs_dim):
-        self.x = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
+        self.x = tf.placeholder(dtype=tf.float32, shape=[self.batch_size] + list(obs_dim))
 
-    def _build_graph(self, h_size, act, scope="autoencoder"):
-        with tf.variable_scope(scope):
-            self.x_hat, self.h_hat = self._build_ae(x=self.x, h_size=h_size, act=act)
+    def _build_graph(self, topology, act):
+        with tf.variable_scope(self.scope):
+            if topology["type"] == "linear":
+                self.x_hat, self.h_hat = self._build_ae(x=self.x, h_size=topology["linear"][1], act=act)
+            else:
+                raise NotImplementedError()
 
-    def _train_op(self, lr):
+    def _train_op(self):
+        self.train_op = self._optim(self._lr).minimize(self.loss)
+
+    def _loss_op(self):
         self.loss = tf.reduce_mean(tf.square(self.x - self.x_hat))
-        self.train_op = tf.train.RMSPropOptimizer(learning_rate=lr).minimize(self.loss)
 
     @staticmethod
     def _trainable_variables(scope="autoencoder"):
         return tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
 
     @staticmethod
-    def _loss_op(x, x_hat, lr, reg):
-        # TODO break train op? Maybe?
-        raise NotImplementedError()
-
-    @staticmethod
     def _build_ae(x, h_size, act):
-        with tf.variable_scope("encoder"):
-            h_hat = tf.layers.dense(inputs=x, units=h_size, activation=act,
-                                    kernel_initializer=tf.random_normal_initializer(stddev=.1), name="enc_h")
-        with tf.variable_scope("decoder"):
-            # for idx, size in enumerate(reversed(h_size[1:])):
-            x_hat = tf.layers.dense(inputs=h_hat, units=x.get_shape()[1], activation=act,
-                                    kernel_initializer=tf.random_normal_initializer(stddev=.1), name="dec_h")
-        return x_hat, h_hat
 
+        h = x
+        with tf.variable_scope("encoder"):
+            for idx, size in enumerate(h_size):
+                h_hat = tf.layers.dense(inputs=h, units=h_size, activation=act,
+                                        kernel_initializer=tf.random_normal_initializer(stddev=.1),
+                                        name="enc_h_{}".format(idx))
+        with tf.variable_scope("decoder"):
+            for idx, size in enumerate(reversed(h_size[1:])):
+                h_hat = tf.layers.dense(inputs=h_hat, units=size, activation=act,
+                                        kernel_initializer=tf.random_normal_initializer(stddev=.1),
+                                        name="dec_h".format(idx))
+
+            x_hat = tf.layers.dense(inputs=h_hat, units=x.get_shape()[1], activation=tf.nn.sigmoid,
+                                    kernel_initializer=tf.random_normal_initializer(stddev=.1), name="logits")
+
+        return x_hat, h_hat
 
 
 class VAE(Autoencoder):
     def __init__(self, obs_dim, h_size, n_p=2, act=tf.nn.elu, lr=1e-3):
         self.n_p = n_p
         self._init_ph(obs_dim=obs_dim)
-        self._build_graph(h_size=h_size, act=act)
+        self._build_graph(topology=h_size, act=act)
         self._train_op(lr=lr)
         pass
 
-    def _build_graph(self, h_size, act, scope="vae"):
+    def _build_graph(self, topology, act):
         x = self.x
         with tf.variable_scope(scope):
             with tf.variable_scope("encoder"):
-                h = tf.layers.dense(inputs=x, units=h_size, activation=act)
+                h = tf.layers.dense(inputs=x, units=topology, activation=act)
                 self.p_mu = tf.layers.dense(inputs=h, units=self.n_p, activation=None)
                 self.p_log_sigma_sq = tf.layers.dense(inputs=h, units=self.n_p, activation=None)
                 eps = tf.random_normal(shape=tf.shape(self.p_mu), mean=0, stddev=1, dtype=tf.float32)
@@ -76,25 +113,28 @@ class VAE(Autoencoder):
 
 
 class AE(Autoencoder):
-    def __init__(self, obs_dim, h_size, act=tf.nn.sigmoid, lr=1e-2):
-        # super().__init__(self, obs_dim, h_size, act, lr)
+    def __init__(self, obs_dim, config):
+        super().__init__(config=config, scope="simple_ae")
         self._init_ph(obs_dim=obs_dim)
-        self._build_graph(h_size, act, scope="AE")
-        self._train_op(lr=lr)
+        self._build_graph(config["topology"], config["act"])
+        self._loss_op()
+        self._train_op()
 
 
 class RAE(Autoencoder):
-    def __init__(self, obs_dim, h_size, act=tf.nn.sigmoid, lr=1e-5, sparsity_level=.5, beta=1e-3):
-        self.beta = beta
-        self.sparsity_level = sparsity_level
+    def __init__(self, obs_dim, config):
+        super().__init__(config=config, scope="residual_ae")
+        self.beta = config.beta  # 1e-3
+        self.sparsity_level = config.sparsity_level  # .5
         self._init_ph(obs_dim=obs_dim)
-        self._build_graph(h_size, act, scope="RAE")
-        self._train_op(lr=lr)
+        self._build_graph(config["topology"], config["act"])
+        self._loss_op()
+        self._train_op()
 
-    def _train_op(self, lr):
+    def _train_op(self):
         regularizer = self.kl_divergence(self.sparsity_level, self.h_hat)
         self.loss = tf.reduce_mean(tf.square(self.x - self.x_hat)) + self.beta * tf.reduce_mean(regularizer)
-        self.train_op = tf.train.RMSPropOptimizer(learning_rate=lr).minimize(self.loss)
+        self.train_op = self._optim(self._lr).minimize(self.loss)
 
     @staticmethod
     def kl_divergence(p, p_hat):
@@ -102,74 +142,64 @@ class RAE(Autoencoder):
 
 
 class DAE(Autoencoder):
-    def __init__(self, obs_dim, h_size, act=tf.nn.sigmoid, lr=1e-2, noise_type="zeros", drop_prob=1.):
-        self._noise_type = noise_type
-        self._drop_prob = drop_prob
+    def __init__(self, obs_dim, config):  # h_size, act=tf.nn.sigmoid, lr=1e-2, noise_type="zeros", drop_prob=1.):
+        super().__init__(config=config, scope="denoise_ae")
+        self._noise_type = config.noise_type
+        self._drop_prob = config.drop_prob
         self._init_ph(obs_dim=obs_dim)
-        self._build_graph(h_size, act, scope="DAE")
-        self._train_op(lr)
+        self._build_graph(config["topology"], config["act"])
+        self._loss_op()
+        self._train_op()
 
     def _init_ph(self, obs_dim):
-        self.x = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
+        super()._init_ph(obs_dim=obs_dim)
         self._drop_prob = tf.placeholder_with_default(tf.constant(self._drop_prob), shape=[])
         self._is_training = tf.placeholder_with_default(tf.constant(0), shape=[])
 
-    def _build_graph(self, h_size, act, scope="autoencoder"):
-        with tf.variable_scope(scope):
-            x_tilde = make_noise(x=self.x, drop_prob=self._drop_prob, noise_type=self._noise_type)
-            x = tf.cond(tf.cast(self._is_training, dtype=tf.bool), lambda: self.x, lambda: x_tilde)
-            self.x_hat, self.h_hat = self._build_ae(x=x, h_size=h_size, act=act)
+    def _build_graph(self, topology, act):
+        x_tilde = make_noise(x=self.x, drop_prob=self._drop_prob, noise_type=self._noise_type)
+        x = tf.cond(tf.cast(self._is_training, dtype=tf.bool), lambda: self.x, lambda: x_tilde)
+        self.x_hat, self.h_hat = self._build_ae(x=x, h_size=topology, act=act)
 
 
-def make_noise(x, drop_prob, noise_type):
-    binary_tensor = tf.floor(tf.random_uniform(shape=tf.shape(x), minval=0, maxval=1) + drop_prob)
-
-    if noise_type == "gaussian":
-        corruption = tf.random_normal(shape=tf.shape(x))
-        return x + binary_tensor * corruption
-    elif noise_type == "zeros":
-        return x * binary_tensor
-    elif noise_type == "uniform":
-        corruption = tf.random_uniform(shape=tf.shape(x))
-        return x + binary_tensor * corruption
-    elif noise_type == "none":
-        return x
-    else:
-        raise NotImplementedError()
+from misc import make_noise
 
 
 class SAE(Autoencoder):
-    def __init__(self, obs_dim, h_size, act=tf.nn.sigmoid, lr=1e-2, drop_prob=1., noise_type="none"):
-        self._noise_type = noise_type
-        self._drop_prob = drop_prob
+    def __init__(self, obs_dim, config):  # , h_size, act=tf.nn.sigmoid, lr=1e-2, drop_prob=1., noise_type="none"):
+        super().__init__(config=config, scope="stacked_ae")
+        self._noise_type = config.noise_type
+        self._drop_prob = config.drop_prob
         self._init_ph(obs_dim=obs_dim)
-        self._build_stack(h_size=h_size, act=act)
-        self._train_op(lr=lr)
+        self._build_graph(topology=config.topology, act=config.act)
+        self._train_op()
 
     def _init_ph(self, obs_dim):
-        self.x = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
+        super()._init_ph(obs_dim=obs_dim)
         self._drop_prob = tf.placeholder_with_default(tf.constant(self._drop_prob), shape=[])
         self._is_training = tf.placeholder_with_default(tf.constant(0), shape=[])
 
-    def _build_stack(self, h_size, act):
+    def _build_stack(self, topology, act):
         self.stack = []
         h = self.x
+
         with tf.variable_scope("SAE"):
-            for idx, size in enumerate(h_size):
+            for idx, size in enumerate(topology["type"][1]):
                 # TODO test with denoising
                 # x_corrupted = make_noise(x=h, drop_prob=self._drop_prob, noise_type=self._noise_type)
                 # h = tf.cond(tf.cast(self._is_training, dtype=tf.bool), lambda: h, lambda: x_corrupted)
                 with tf.variable_scope("ae_{}".format(idx)):
-                    x_tilde, h = self._build_ae(tf.stop_gradient(h), size, act)
+                    x_tilde, h = self._build_ae(tf.stop_gradient(h), [size], act)
                     self.stack.append((x_tilde, h))
 
-    def _train_op(self, lr):
+    def _train_op(self):
         self.train_schedule = {}
         x = self.x
         for idx, s in enumerate(self.stack):
             x_tilde, h = s
             loss = tf.reduce_mean(tf.square(x - x_tilde))
-            train_op = tf.train.RMSPropOptimizer(learning_rate=lr).minimize(loss)
+            # TODO maybe should try different lr for different level of the stack
+            train_op = self._optim(self._lr).minimize(loss)
             self.train_schedule["ae_{}".format(idx)] = {"loss": loss, "train_op": train_op}
 
             x = h
@@ -261,7 +291,7 @@ class Corruptor(object):
         x_max = np.max(x)
         for idx in range(n):
             mask = np.random.randint(0, d, p, dtype=np.int32)
-            for m in mask:
+            for m in range(mask):
                 x_tilde[idx][m] = self._corrupt((x_min, x_max))
         return x_tilde
 
@@ -272,12 +302,13 @@ class Corruptor(object):
         else:
             return x_min
 
+
 class VQVAE(object):
     def __init__(self, obs_dim, h_size, e_dims=(64, 5), act=tf.nn.relu, lr=1e-2, beta=.25):
         self.dict_size, self.k_dim = e_dims
         self.beta = beta
         self.global_step = tf.train.get_or_create_global_step()
-        self._init_ph(obs_dim= obs_dim)
+        self._init_ph(obs_dim=obs_dim)
         self._build_graph(h_size=h_size, act=act, scope="vqvae")
         self._train_op(lr=lr)
 
@@ -294,9 +325,9 @@ class VQVAE(object):
                 self.z_e = tf.layers.dense(inputs=x, units=h_size, activation=act)
                 # batch_size, latent_h, latent_w, K, D
                 # D: dictionary size and K dim of the latent space
-                z_e = tf.tile(tf.expand_dims(self.z_e, -2), [1,  self.k_dim, 1])
+                z_e = tf.tile(tf.expand_dims(self.z_e, -2), [1, self.k_dim, 1])
                 # embbedding
-                e = tf.reshape(self.e, [1 , self.k_dim, self.dict_size])
+                e = tf.reshape(self.e, [1, self.k_dim, self.dict_size])
                 k = tf.argmin(tf.norm(z_e - e, axis=-1), axis=-1)  # [latent_h, latent_w, D]
                 self.z_q = tf.gather(self.e, k)
             with tf.variable_scope("decoder"):
@@ -308,7 +339,7 @@ class VQVAE(object):
         self.vq_loss = tf.reduce_mean(tf.stop_gradient(self.z_e) - self.z_q) ** 2
         self.commit_loss = tf.reduce_mean(tf.norm(self.z_e - tf.stop_gradient(self.z_q)) ** 2)
         # elf.neg_log- (tf.log(self.x_hat + 1e-5) - tf.log(1/tf.cast(self.k_dim, tf.float32)))
-        self.recon_loss = tf.reduce_mean(tf.square(self.p_x_z- self.x))
+        self.recon_loss = tf.reduce_mean(tf.square(self.p_x_z - self.x))
         #
         # should do all dimension [1,2,3]
         self.recon_loss = - (tf.reduce_mean(tf.log(self.p_x_z)) - tf.log(tf.cast(self.k_dim, tf.float32)))
@@ -335,4 +366,3 @@ class VQVAE(object):
         self.train_op = tf.train.AdamOptimizer(learning_rate=lr).apply_gradients(
             dec_gvs + enc_gvs + embed_gvs, global_step=self.global_step
         )
-
