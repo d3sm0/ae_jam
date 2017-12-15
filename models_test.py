@@ -13,7 +13,7 @@ display_step = 1000
 examples_to_show = 10
 
 
-model = AE(obs_dim=784, h_size=64, lr=1e-2)
+model = AE(None, )
 # model = SAE(obs_dim=784, h_size=[64], lr=1e-2)
 # model = DAE(obs_dim=784, h_size=64, lr=1e-2, drop_prob=.2, noise_type="zeros")
 # model = SAE(obs_dim=784, h_size=(128,64), lr = 1e-2)
