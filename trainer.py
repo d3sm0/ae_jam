@@ -1,99 +1,51 @@
 from models import *
+from utils.tf_utils import set_global_seed, make_session, init_graph
+from utils.logger import Logger
 
 
-# TODO fix trainer
 class Trainer(object):
-    def __init__(self, config):
-        self.model = select_ae(config.which_ae)
-        self.saver = tf.train.Saver(self.model._trainable_variables(self.model.scope))
-        self.sess = tf.Session()
-        self.sess.run(tf.global_variables_initializer())
+    def __init__(self, obs_dim, config):
+        self.model = select_ae(config.which_ae)(obs_dim, config)
+        self.sess = make_session()
+        self.logger = Logger(log_dir="logs/", var_list=self.model._params)
+        set_global_seed(config.seed)
+        init_graph(self.sess)
 
-    def train(self, dataset, max_steps, batch_size):
+    def summarize(self, stats, batch):
+        summaries, global_step = self.sess.run([self.model._summaries, self.model.global_step], feed_dict={self.model.x:batch})
+        self.logger.dump(stats=stats, tf_summary=summaries, global_step=global_step)
 
-        with self.sess.as_default():
-            if self.enc_type != "SAE":
-                return self._train(x=self.model.x, train_op=self.model.train_op, loss=self.model.loss, dataset=dataset,
-                                   max_steps=max_steps)
-            else:
-                return self._train_stack(dataset=dataset, max_steps=max_steps, batch_size=32)
+    def save(self, global_step):
+        self.logger.save_model(sess=self.sess, global_step=global_step)
 
     def encode(self, x):
-        if self.enc_type != SAE:
-            h_hat = self.sess.run(self.model.h_hat, feed_dict={self.model.x: x})
-            return h_hat
-        else:
-            # Return only the latest encoding
-            x_tilde, h_hat = self.sess.run(self.model.stack[-1], feed_dict={self.model.x: x})
-            return h_hat
+        return self.sess.run(self.model.h_hat, feed_dict={self.model.x: x})
 
-    @staticmethod
-    def _train(x, train_op, loss, dataset=None, max_steps=10000, batch_size=32):
-        # TODO implement general batch training or the Dataset from tf
-        # dataset = mnist.train
-        sess = tf.get_default_session()
-        display_step = int(max_steps / 100)
+    def decode(self, x):
+        return self.sess.run(self.model.x_hat, feed_dict={self.model.x: x})
+
+    def latent(self, x):
+        assert self.model.scope == "vae" or self.model.scope == "vqvae"
+        return self.sess.run(self.model.z, feed_dict={self.model.x: x})
+
+    def vq(self, x):
+        assert self.model.scope == "vqvae"
+        return self.sess.run(self.model.e, feed_dict={self.model.x: x})
+
+    def train(self, batch):
+        assert self.model.scope != "stacked_ae"
+        loss, _, = self.sess.run([self.model.loss, self.model.train_op], feed_dict={self.model.x:batch})
+        return loss
+
+    def train_stacked(self, batch):
+        assert self.model.scope == "stacked_ae"
         losses = []
-        for step in range(max_steps):
-            batch_x, _ = dataset.next_batch(batch_size)
-            _, loss = sess.run([train_op, loss], feed_dict={x: batch_x})
-            losses.append(loss)
-            if step % display_step == 0:
-                print("Step {}: Minibatch Loss: {:.2f}".format(step, loss))
-
-        return np.mean(losses)
-
-    def _train_stack(self, dataset, max_steps, batch_size):
-        assert self.enc_type == "SAE"
-        dataset = mnist.train
         for key in sorted(self.model.train_schedule.keys()):
-            ops = self.model.train_schedule[key]
-            l = self._train(x=self.model.x, train_op=ops["train_op"], loss=ops["loss"], dataset=dataset)
-            print("Stack {}: Minibatch Avg Loss: {:.2f}".format(key, l))
-
-    def test(self, batch):
-        x_tilde = self.sess.run(self.model.x_hat, feed_dict={self.model.x: batch})
-        return x_tilde
-
-    def save(self):
-        self.saver.save(sess=self.sess, save_path="logs/model.ckpt")
+            loss, = self.sess.run(list(self.model.train_chedule[key].values()), feed_dict={self.model.x:batch})
+            losses.append(loss)
 
 
-from config import Config
-
-from tensorflow.examples.tutorials.mnist import input_data
-
-mnist = input_data.read_data_sets("datasets/mnist", one_hot=False)
-# create dataset
-features_ph = tf.placeholder(mnist.train.images.dtype, mnist.train.images.shape)
-labels_ph = tf.placeholder(mnist.train.labels.dtype, mnist.train.labels.shape)
-dataset = tf.data.Dataset.from_tensor_slices((features_ph, labels_ph))
-# crate batches
-batch_size = 64
-num_epochs = 50
 
 
-dataset = dataset.repeat(num_epochs)
-dataset = dataset.shuffle(buffer_size=10000)
-dataset = dataset.batch(batch_size=batch_size)
-# create an in iterator to iterate over the dataset
-iterator = dataset.make_initializable_iterator()
 
-x, y = iterator.get_next()
-Config.topology = dict(_type = "cnn", _arch = [(16,4,2), (32, 4,2), (128,4,2)])
-ae = VAE(obs_dim=x.get_shape()[1].value, link=x, config=Config)
-with tf.Session() as sess:
-    losses = []
-    sess.run(tf.global_variables_initializer())
-    for _ in range(num_epochs):
-        sess.run(iterator.initializer, feed_dict={features_ph: mnist.train.images, labels_ph: mnist.train.labels})
-        try:
-            recon_loss, reg_loss, _ = sess.run((ae.recon_loss, ae.regularizer, ae.train_op))
-            print(recon_loss, reg_loss)
-            losses.append(recon_loss+reg_loss)
-        except tf.errors.OutOfRangeError:
-            print("ops")
-import matplotlib.pyplot as plt
 
-plt.plot(losses)
-plt.show()

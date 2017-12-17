@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from util import make_noise, fc, conv, convT, flatten
+from utils.tf_utils import make_noise, fc, conv, convT, flatten, summary_op
 
 
 class Autoencoder(object):
@@ -13,9 +13,8 @@ class Autoencoder(object):
         else:
             self._init_ph(obs_dim)
         self.global_step = tf.train.get_or_create_global_step()
-
     def _init_ph(self, obs_dim):
-        self.x = tf.placeholder(dtype=tf.float32, shape=[self.batch_size] + [obs_dim])
+        self.x = tf.placeholder(dtype=tf.float32, shape=obs_dim)
 
     def _add_noise(self, drop_prob, noise_type):
         self._drop_prob = tf.placeholder_with_default(tf.constant(drop_prob), shape=[])
@@ -30,30 +29,40 @@ class Autoencoder(object):
             x = self.x
             if noise_type is not None:
                 x = self._add_noise(drop_prob=drop_prob, noise_type=noise_type)
-            self.h_hat = self._build_encoder(x=x, topology=topology, act=act)
+            self.h_hat = self._build_encoder(x=x, obs_dim=obs_dim, topology=topology, act=act)
             self.x_hat = self._build_decoder(enc=self.h_hat, obs_dim=obs_dim, topology=topology,
                                              act=act)
 
     def _train_op(self, lr):
         self.train_op = self._optim(lr).minimize(self.loss)
+        self._params = self._trainable_variables(self.scope)
 
     def _loss_op(self):
         self.loss = tf.reduce_mean(tf.square(self.x - self.x_hat))
+
+    def _summary_op(self, t_list, obs_dim=(1,)):
+        img_list = None
+        t_list += [self.loss]
+        if len(obs_dim) < 4:
+            t_list += [self.x_hat, self.h_hat]
+        else:
+            img_list = [tf.reshape(self.x_hat, obs_dim), self.h_hat]
+        self._summaries = summary_op(t_list, img_list)
 
     @staticmethod
     def _trainable_variables(scope="autoencoder"):
         return tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
 
     @staticmethod
-    def _build_encoder(x, topology, act):
-        h = tf.reshape(x, [-1,28,28,1]) # TODO bad hack for mnist
-        # h= x
+    def _build_encoder(x, obs_dim, topology, act):
+        h = x
         with tf.variable_scope("encoder"):
             if topology["_type"] == "linear":
                 for idx, size in enumerate(topology["_arch"]):
                     h = fc(h, scope="h_{}".format(idx), units=size, act=act)
             elif topology["_type"] == "cnn":
-                assert h.get_shape().ndims == 4
+                if not h.get_shape().ndims == 4:
+                    h = tf.reshape(h, shape = [-1]+obs_dim[1:])  # TODO bad hack for mnist
                 # use (-1,1,D,1) for 1D Conv
                 for idx, (num_filters, kernel_size, stride) in enumerate(topology["_arch"]):
                     h = conv(x=h, num_filters=num_filters, kernel_size=kernel_size, stride=stride,
@@ -67,14 +76,16 @@ class Autoencoder(object):
             if topology["_type"] == "linear":
                 for idx, size in enumerate(reversed(topology["_arch"][1:])):
                     h_hat = fc(h_hat, scope="h_{}".format(idx), units=size, act=act)
+                obs_dim = obs_dim[1]
             elif topology["_type"] == "cnn":
                 # assert h_hat.get_shape().ndims == 4
-                if h_hat.get_shape().ndims <4:
-                    h_hat = tf.expand_dims(tf.expand_dims(h_hat, 1),1)
+                if h_hat.get_shape().ndims < 4:
+                    h_hat = tf.expand_dims(tf.expand_dims(h_hat, 1), 1)
                 # use (-1,1,D,1) for 1D Conv
                 for idx, (num_filters, kernel_size, stride) in enumerate(reversed(topology["_arch"][1:])):
                     h_hat = convT(x=h_hat, num_filters=num_filters, kernel_size=kernel_size, stride=stride,
                                   scope="conv_{}".format(idx))
+                obs_dim = obs_dim[1] * obs_dim[2] * obs_dim[3]  # TODO find a better way to mange shapes
                 h_hat = flatten(h_hat)
             x_hat = fc(h_hat, scope="logits", units=obs_dim, act=tf.nn.sigmoid)
         return x_hat
@@ -88,13 +99,14 @@ class VAE(Autoencoder):
                          noise_type=config.noise_type)
         self._loss_op()
         self._train_op(config.lr)
+        self._summary_op([self.recon_loss, self.regularizer, self.z_log_sigma_sq, self.z_mu], obs_dim=obs_dim)
 
     @staticmethod
     def _build_z(enc, z_dim):
         with tf.variable_scope("latent"):
             if enc.get_shape().ndims > 2:
                 enc = flatten(enc)
-            z_mu= fc(x=enc, scope="mu_z", units=z_dim, act=lambda x: x)
+            z_mu = fc(x=enc, scope="mu_z", units=z_dim, act=lambda x: x)
             z_log_sigma_sq = fc(x=enc, scope="log_sigma_sq_z", units=z_dim, act=lambda x: x)
             eps = tf.random_normal(shape=tf.shape(z_log_sigma_sq), mean=0, stddev=1, dtype=tf.float32)
             z = z_mu + tf.sqrt(tf.exp(z_log_sigma_sq)) * eps
@@ -105,14 +117,14 @@ class VAE(Autoencoder):
             x = self.x
             if noise_type is not None:
                 x = self._add_noise(drop_prob=drop_prob, noise_type=noise_type)
-            self.h_hat = self._build_encoder(x=x, topology=topology, act=act)
+            self.h_hat = self._build_encoder(x=x, obs_dim=obs_dim, topology=topology, act=act)
             self.z_mu, self.z_log_sigma_sq, self.z = self._build_z(enc=self.h_hat, z_dim=self.z_dim)
             self.x_hat = self._build_decoder(enc=self.z, obs_dim=obs_dim, topology=topology, act=act)
 
     def _loss_op(self):
         epsilon = 1e-10
         entropy = -tf.reduce_sum(
-            self.x * tf.log(epsilon+self.x_hat) + (1-self.x) * tf.log(epsilon+1-self.x_hat),
+            self.x * tf.log(epsilon + self.x_hat) + (1 - self.x) * tf.log(epsilon + 1 - self.x_hat),
             axis=-1
         )
         self.recon_loss = tf.reduce_mean(entropy)
@@ -125,7 +137,7 @@ class VAE(Autoencoder):
 
 class VQVAE(Autoencoder):
     def __init__(self, obs_dim, config, link=None):  # , h_size, e_dims=(64, 5), act=tf.nn.relu, lr=1e-2, beta=.25):
-        super().__init__(obs_dim, config=config, scope="VQVAE", link=link)
+        super().__init__(obs_dim, config=config, scope="vqvae", link=link)
         self.z_dim = config.z_dim  # would be k dimension in the paper
         self.dict_size = config.dict_size
         self.beta = config.beta
@@ -133,6 +145,7 @@ class VQVAE(Autoencoder):
                          noise_type=config.noise_type)
         self._loss_op()
         self._train_op(config.lr)
+        self._summary_op([self.recon_loss, self.vq_loss, self.commit_loss, self.e, self.z_q], obs_dim=obs_dim)
 
     @staticmethod
     def _build_z(enc, z_dim, dict_size):
@@ -141,26 +154,28 @@ class VQVAE(Autoencoder):
 
             # batch_size, latent_h, latent_w, K, D
             # D: dictionary size and K dim of the latent space
-            z_e = tf.tile(tf.expand_dims(enc, -2), [1, z_dim, 1])
+            z_e = tf.tile(tf.expand_dims(enc, -2), [1, 1, 1, z_dim, 1])
             # embbedding
-            e_exp = tf.reshape(e, [1, z_dim, dict_size])
+            e_exp = tf.reshape(e, [1, 1, 1, z_dim, dict_size])
             k = tf.argmin(tf.norm(z_e - e_exp, axis=-1), axis=-1)  # [latent_h, latent_w, D]
             z_q = tf.gather(e, k)
-        return e, z_q
+        return e, z_q,k
 
     def _init_graph(self, obs_dim, topology, act, noise_type=None, drop_prob=None):
         with tf.variable_scope(self.scope):
             x = self.x
             if noise_type is not None:
                 x = self._add_noise(drop_prob=drop_prob, noise_type=noise_type)
-            self.z_e = self._build_encoder(x=x, topology=topology, act=act)
-            self.e, self.z_q = self._build_z(enc=self.z_e, z_dim=self.z_dim, dict_size=self.dict_size)
+            # z_e
+            self.h_hat = self._build_encoder(x=x, obs_dim=obs_dim, topology=topology, act=act)
+            # z = k
+            self.e, self.z_q, self.z= self._build_z(enc=self.h_hat, z_dim=self.z_dim, dict_size=self.dict_size)
             # x_hat = p_x_z
             self.x_hat = self._build_decoder(enc=self.z_q, obs_dim=obs_dim, topology=topology, act=act)
 
     def _loss_op(self):
-        self.vq_loss = tf.reduce_mean(tf.norm(tf.stop_gradient(self.z_e) - self.z_q, axis=-1) ** 2)
-        self.commit_loss = tf.reduce_mean(tf.norm(self.z_e - tf.stop_gradient(self.z_q), axis=-1) ** 2)
+        self.vq_loss = tf.reduce_mean(tf.norm(tf.stop_gradient(self.h_hat) - self.z_q, axis=-1) ** 2)
+        self.commit_loss = tf.reduce_mean(tf.norm(self.h_hat - tf.stop_gradient(self.z_q), axis=-1) ** 2)
         # elf.neg_log- (tf.log(self.x_hat + 1e-5) - tf.log(1/tf.cast(self.k_dim, tf.float32)))
         self.recon_loss = tf.reduce_mean(tf.square(self.x_hat - self.x))
         #
@@ -181,7 +196,7 @@ class VQVAE(Autoencoder):
         enc_grads = []
         # this can be written using add_n
         for param in encoder_params:
-            g = tf.gradients(self.z_e, param, grad_z)[0] + tf.gradients(self.commit_loss, param)[0]
+            g = tf.gradients(self.h_hat, param, grad_z)[0] + tf.gradients(self.commit_loss, param)[0]
             enc_grads.append(g)
 
         enc_gvs = list(zip(enc_grads, encoder_params))
@@ -189,6 +204,7 @@ class VQVAE(Autoencoder):
         self.train_op = self._optim(learning_rate=lr).apply_gradients(
             dec_gvs + enc_gvs + embed_gvs, global_step=self.global_step
         )
+        self._params = [encoder_params, decoder_params, self.e]
 
 
 class AE(Autoencoder):
@@ -198,6 +214,7 @@ class AE(Autoencoder):
                          noise_type=config.noise_type)
         self._loss_op()
         self._train_op(config.lr)
+        self._summary_op(t_list=[])
 
 
 class RAE(Autoencoder):
@@ -210,11 +227,13 @@ class RAE(Autoencoder):
                          noise_type=config.noise_type)
         self._loss_op()
         self._train_op(config.lr)
+        self._summary_op(t_list=[])
 
     def _train_op(self, lr):
         regularizer = self.kl_divergence(self.sparsity_level, self.h_hat)
         self.loss = tf.reduce_mean(tf.square(self.x - self.x_hat)) + self.beta * tf.reduce_mean(regularizer)
-        self.train_op = self._optim(self._lr).minimize(self.loss)
+        self.train_op = self._optim(lr).minimize(self.loss)
+        self._params = self._trainable_variables(self.scope)
 
     @staticmethod
     def kl_divergence(p, p_hat):
@@ -229,6 +248,7 @@ class DAE(Autoencoder):
                          noise_type=config.noise_type)
         self._loss_op()
         self._train_op(config.lr)
+        self._summary_op(t_list=[])
 
 
 def select_ae(ae):
@@ -253,6 +273,7 @@ class SAE(Autoencoder):
 
         self._build_stack(obs_dim=obs_dim, config=config, link=link)
         self._train_op(config.lr)
+        self._summary_op(t_list=[])
 
     def _build_stack(self, obs_dim, config, link=None):
         which_ae = config.which_ae
@@ -266,8 +287,11 @@ class SAE(Autoencoder):
                     ae = Ae(obs_dim=h.get_shape()[1], config=config, link=tf.stop_gradient(h))
                     h = ae.h_hat
                     self.stack.append((ae.loss, ae.train_op))
+        self.h_hat = h
 
     def _train_op(self, lr):
         self.train_schedule = {}
         for idx, (loss, train_op) in enumerate(self.stack):
             self.train_schedule["ae_{}".format(idx)] = {"loss": loss, "train_op": train_op}
+
+        self._params = self._trainable_variables(self.scope)

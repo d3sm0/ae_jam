@@ -3,14 +3,17 @@ import tensorflow as tf
 class Config():
     batch_size = 64
     train_steps = 10000
+    save_freq = 100
+    seed = 123
     log_path = "logs/"
     lr = 1e-3
     clip = 40.
     optim = tf.train.AdamOptimizer
     z_dim = 10
+    maxsteps = 1000
     dict_size =64
     depth = 2
-    which_ae = "VAE"
+    which_ae = "AE"
     noise_type = None
     # TODO add CNN
     topology = dict(_type = "linear", _arch= [128,64,32])
