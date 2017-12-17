@@ -70,7 +70,7 @@ labels_ph = tf.placeholder(mnist.train.labels.dtype, mnist.train.labels.shape)
 dataset = tf.data.Dataset.from_tensor_slices((features_ph, labels_ph))
 # crate batches
 batch_size = 64
-num_epochs = 20
+num_epochs = 50
 
 
 dataset = dataset.repeat(num_epochs)
@@ -81,16 +81,16 @@ iterator = dataset.make_initializable_iterator()
 
 x, y = iterator.get_next()
 Config.topology = dict(_type = "cnn", _arch = [(16,4,2), (32, 4,2), (128,4,2)])
-ae = AE(obs_dim=x.get_shape()[1].value, link=x, config=Config)
+ae = VAE(obs_dim=x.get_shape()[1].value, link=x, config=Config)
 with tf.Session() as sess:
     losses = []
     sess.run(tf.global_variables_initializer())
     for _ in range(num_epochs):
         sess.run(iterator.initializer, feed_dict={features_ph: mnist.train.images, labels_ph: mnist.train.labels})
         try:
-            l, _ = sess.run((ae.loss, ae.train_op))
-            losses.append(l)
-            print(l)
+            recon_loss, reg_loss, _ = sess.run((ae.recon_loss, ae.regularizer, ae.train_op))
+            print(recon_loss, reg_loss)
+            losses.append(recon_loss+reg_loss)
         except tf.errors.OutOfRangeError:
             print("ops")
 import matplotlib.pyplot as plt

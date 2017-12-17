@@ -75,7 +75,8 @@ class Autoencoder(object):
                 for idx, (num_filters, kernel_size, stride) in enumerate(reversed(topology["_arch"][1:])):
                     h_hat = convT(x=h_hat, num_filters=num_filters, kernel_size=kernel_size, stride=stride,
                                   scope="conv_{}".format(idx))
-            x_hat = fc(flatten(h_hat), scope="logits", units=obs_dim, act=tf.nn.sigmoid)
+                h_hat = flatten(h_hat)
+            x_hat = fc(h_hat, scope="logits", units=obs_dim, act=tf.nn.sigmoid)
         return x_hat
 
 
@@ -91,10 +92,12 @@ class VAE(Autoencoder):
     @staticmethod
     def _build_z(enc, z_dim):
         with tf.variable_scope("latent"):
+            if enc.get_shape().ndims > 2:
+                enc = flatten(enc)
             z_mu= fc(x=enc, scope="mu_z", units=z_dim, act=lambda x: x)
             z_log_sigma_sq = fc(x=enc, scope="log_sigma_sq_z", units=z_dim, act=lambda x: x)
-            eps = tf.random_normal(shape=tf.shape(z_mu), mean=0, stddev=1, dtype=tf.float32)
-            z = z_mu + tf.multiply(tf.sqrt(tf.exp(z_log_sigma_sq)), eps)
+            eps = tf.random_normal(shape=tf.shape(z_log_sigma_sq), mean=0, stddev=1, dtype=tf.float32)
+            z = z_mu + tf.sqrt(tf.exp(z_log_sigma_sq)) * eps
         return z_mu, z_log_sigma_sq, z
 
     def _init_graph(self, obs_dim, topology, act, noise_type=None, drop_prob=None):
@@ -103,20 +106,21 @@ class VAE(Autoencoder):
             if noise_type is not None:
                 x = self._add_noise(drop_prob=drop_prob, noise_type=noise_type)
             self.h_hat = self._build_encoder(x=x, topology=topology, act=act)
-            self.z_mu, self.z_log_sigma_sq, self.z = self._build_z(enc=flatten(self.h_hat), z_dim=self.z_dim)
+            self.z_mu, self.z_log_sigma_sq, self.z = self._build_z(enc=self.h_hat, z_dim=self.z_dim)
             self.x_hat = self._build_decoder(enc=self.z, obs_dim=obs_dim, topology=topology, act=act)
 
     def _loss_op(self):
-        eps = 1e-5
+        epsilon = 1e-10
         entropy = -tf.reduce_sum(
-            self.x * tf.log(eps + self.x_hat) + (1 - self.x) * tf.log(eps + 1 - self.x_hat), axis=-1
+            self.x * tf.log(epsilon+self.x_hat) + (1-self.x) * tf.log(epsilon+1-self.x_hat),
+            axis=-1
         )
-        self.regularizer = tf.reduce_mean(entropy)
+        self.recon_loss = tf.reduce_mean(entropy)
         # p is the noise distribution and z is N(0,1)
-        kl_p_z = - 0.5 * tf.reduce_sum(
+        kl_p_z = -0.5 * tf.reduce_sum(
             1 + self.z_log_sigma_sq - tf.square(self.z_mu) - tf.exp(self.z_log_sigma_sq), axis=-1)
-        self.recon_loss = tf.reduce_mean(kl_p_z)
-        self.loss = self.regularizer + self.recon_loss
+        self.regularizer = tf.reduce_mean(kl_p_z)
+        self.loss = tf.reduce_mean(self.recon_loss + self.regularizer)
 
 
 class VQVAE(Autoencoder):

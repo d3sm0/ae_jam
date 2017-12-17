@@ -8,10 +8,14 @@ def flatten(x):
     return x
 
 
-def fc(x, scope, units, act=tf.nn.relu, init_scale=0.1):
+# def glorot_init(f_in, f_out):
+#     l = tf.sqrt(6/(f_in + f_out))
+#     l = tf.cast(l, dtype=tf.int32)
+#     return tf.random_uniform_initializer(minval =-l, maxval=l, dtype=tf.float32)
+def fc(x, scope, units, act=tf.nn.relu):
     with tf.variable_scope(scope):
         d = x.get_shape()[1].value
-        w = tf.get_variable("w", [d, units], initializer=tf.random_normal_initializer(init_scale))
+        w = tf.get_variable("w", [d, units], initializer= tf.glorot_uniform_initializer(dtype=tf.float32))# tf.random_normal_initializer(init_scale))
         b = tf.get_variable("b", [units], initializer=tf.constant_initializer(0.0))
         z = tf.matmul(x, w) + b
         h = act(z)
@@ -20,13 +24,13 @@ def fc(x, scope, units, act=tf.nn.relu, init_scale=0.1):
 
 # tf default [batch_size, height, width, channel], cuda default NCHW
 # use (1, k) and (1,s) for convolution over time
-def conv(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.relu, init_scale=1.0):
+def conv(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.relu, init_scale = 1.):
     # k_h, k_w = kernel_size
     # s_h, s_w = stride
     with tf.variable_scope(scope):
         channels = x.get_shape()[3]
         w = tf.get_variable("w", [kernel_size, kernel_size, channels, num_filters],
-                            initializer=tf.random_normal_initializer(init_scale))
+                            initializer=tf.orthogonal_initializer(init_scale))
         b = tf.get_variable("b", [num_filters], initializer=tf.constant_initializer(0.0))
         z = tf.nn.conv2d(x, w, strides=[1, stride, stride, 1], padding=padding) + b
         h = act(z)
@@ -37,9 +41,9 @@ def convT(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.
     # k_h, k_w = kernel_size
     # s_h, s_w = stride
     with tf.variable_scope(scope):
-        width, height, channels = x.get_shape().dims[1:]
+        height, width, channels = x.get_shape().dims[1:]
         w = tf.get_variable("w", [kernel_size, kernel_size, num_filters, channels],
-                            initializer=tf.random_normal_initializer(init_scale))
+                            initializer=tf.orthogonal_initializer(init_scale))
         b = tf.get_variable("b", [num_filters], initializer=tf.constant_initializer(0.0))
         shape = tf.stack([tf.shape(x)[0],height * stride, width * stride, num_filters])
         z = tf.nn.conv2d_transpose(x, w, output_shape=shape, strides=[1, stride, stride, 1],
