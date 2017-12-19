@@ -13,6 +13,7 @@ class Trainer(object):
 
     def summarize(self, stats, batch):
         summaries, global_step = self.sess.run([self.model._summaries, self.model.global_step], feed_dict={self.model.x:batch})
+
         self.logger.dump(stats=stats, tf_summary=summaries, global_step=global_step)
 
     def save(self, global_step):

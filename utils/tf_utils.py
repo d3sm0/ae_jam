@@ -9,6 +9,8 @@ def flatten(x):
     units = np.prod([t.value for t in x.get_shape()[1:]])
     x = tf.reshape(x, [-1, units])
     return x
+def tf_logging(msg):
+    tf.logging.info(msg)
 
 def fc(x, scope, units, act=tf.nn.relu):
     with tf.variable_scope(scope):
@@ -20,29 +22,47 @@ def fc(x, scope, units, act=tf.nn.relu):
         h = act(z)
         return h
 
+
 # tf default [batch_size, height, width, channel], cuda default NCHW
 # use (1, k) and (1,s) for convolution over time
-def conv(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.relu, init_scale=1.):
+def conv(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.relu, init_scale=1., dim=2):
+    if dim == 1:
+        assert x.get_shape().ndims == 3
+
+    k_h, k_w = kernel_size
+    s_h, s_w = stride
+    x = tf.expand_dims(x) if dim == 1 else x
     with tf.variable_scope(scope):
         channels = x.get_shape()[3]
-        w = tf.get_variable("w", [kernel_size, kernel_size, channels, num_filters],
+        w = tf.get_variable("w", [k_h, k_w, channels, num_filters],
                             initializer=tf.orthogonal_initializer(init_scale))
         b = tf.get_variable("b", [num_filters], initializer=tf.constant_initializer(0.0))
-        z = tf.nn.conv2d(x, w, strides=[1, stride, stride, 1], padding=padding) + b
+        z = tf.nn.conv2d(x, w, strides=[1, s_h, s_w, 1], padding=padding) + b
         h = act(z)
-        return h
+        h = tf.squeeze(h) if dim == 1 else h
+    return h
 
-def convT(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.relu, init_scale=1.0):
+
+def convT(x, scope, num_filters, kernel_size, stride, padding='SAME', act=tf.nn.relu, init_scale=1.0, dim=2):
+    if dim == 1:
+        assert x.get_shape().ndims == 3
+
+    k_h, k_w = kernel_size
+    s_h, s_w = stride
+    x = tf.expand_dims(x) if dim == 1 else x
     with tf.variable_scope(scope):
         height, width, channels = x.get_shape().dims[1:]
-        w = tf.get_variable("w", [kernel_size, kernel_size, num_filters, channels],
+        w = tf.get_variable("w", [k_h, k_w, num_filters, channels],
                             initializer=tf.orthogonal_initializer(init_scale))
         b = tf.get_variable("b", [num_filters], initializer=tf.constant_initializer(0.0))
-        shape = tf.stack([tf.shape(x)[0], height * stride, width * stride, num_filters])
-        z = tf.nn.conv2d_transpose(x, w, output_shape=shape, strides=[1, stride, stride, 1],
+        shape = tf.stack([tf.shape(x)[0], height * s_h, width * s_w, num_filters])
+
+        z = tf.nn.conv2d_transpose(x, w, output_shape=shape, strides=[1, s_h, s_w, 1],
                                    padding=padding) + b
         h = act(z)
+        h = tf.squeeze(h) if dim == 1 else h
         return h
+
 
 def make_noise(x, drop_prob, noise_type):
     binary_tensor = tf.floor(tf.random_uniform(shape=tf.shape(x), minval=0, maxval=1) + drop_prob)
@@ -60,13 +80,16 @@ def make_noise(x, drop_prob, noise_type):
     else:
         raise NotImplementedError()
 
+
 def set_global_seed(seed=1234):
     np.random.seed(seed)
     tf.set_random_seed(seed)
     pass
 
+
 def get_trainable_variables(scope):
     return tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
+
 
 def load_model(sess, load_path, var_list=None):
     ckpt = tf.train.load_checkpoint(ckpt_dir_or_file=load_path)
@@ -75,6 +98,7 @@ def load_model(sess, load_path, var_list=None):
         saver.restore(sess=sess, save_path=ckpt)
     except Exception as e:
         tf.logging.error(e)
+
 
 def save(sess, save_path, var_list=None):
     os.makedirs(save_path, exist_ok=True)
@@ -85,18 +109,23 @@ def save(sess, save_path, var_list=None):
     except Exception as e:
         tf.logging.error(e)
 
+
 def create_saver(var_list):
     return tf.train.Saver(var_list=var_list, save_relative_paths=True, reshape=True)
+
 
 def create_writer(path, suffix):
     return tf.summary.FileWriter(logdir=path, flush_secs=360, filename_suffix=suffix)
 
+
 def create_summary():
     return tf.summary.Summary()
+
 
 def init_graph(sess):
     sess.run(tf.global_variables_initializer())
     tf.logging.info('Graph initialized')
+
 
 def make_config(num_cpu, memory_fraction=.25):
     tf_config = tf.ConfigProto(
@@ -107,8 +136,10 @@ def make_config(num_cpu, memory_fraction=.25):
     tf_config.gpu_options.allow_growth = False
     return tf_config
 
+
 def make_session(num_cpu=3):
     return tf.Session(config=make_config(num_cpu=num_cpu))
+
 
 class Corruptor(object):
     def __init__(self, noise_type):
@@ -140,7 +171,8 @@ class Corruptor(object):
         else:
             return x_min
 
-def summary_op(t_list, img_list = None):
+
+def summary_op(t_list, img_list=None):
     ops = []
     for t in t_list:
         name = t.name.replace(':', '_')

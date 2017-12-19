@@ -1,4 +1,9 @@
-Don't mind me, i'm jam of Autoencoder we have:
+## AE - JAM
+
+It's a jam of different models to perform encoding-decoding of images.
+
+## Implemented models:
+
 - Normal
 - Sparse
 - Stacked
@@ -11,3 +16,6 @@ Missing:
 
 Status:
 It's mostly working but something can still break here and there
+
+ToDo:
+- Add sample from prior for VQVAE

@@ -4,3 +4,6 @@ __pycache__
 vae.py
 vqvae.py
 datasets/
+*.pkl
+pacman_pkl
+pacman_exp.py

@@ -2,7 +2,7 @@ import csv
 import os
 from datetime import datetime
 
-from utils.tf_utils import create_writer, create_saver, create_summary
+from utils.tf_utils import create_writer, create_saver, create_summary, tf_logging
 
 
 class Logger(object):
@@ -60,6 +60,7 @@ class Logger(object):
                 sess, save_path=self.save_path + '/model.ckpt', global_step=global_step,
                 write_meta_graph=False
             )
+            tf_logging("Model saved at step{}".format(global_step))
         except Exception as e:
             print('Can not save', e)
             raise e

@@ -14,6 +14,8 @@ class Autoencoder(object):
             self._init_ph(obs_dim)
         self.global_step = tf.train.get_or_create_global_step()
     def _init_ph(self, obs_dim):
+        if len(obs_dim) > 2:
+            obs_dim = [None, obs_dim[1] * obs_dim[2] * obs_dim[3]]
         self.x = tf.placeholder(dtype=tf.float32, shape=obs_dim)
 
     def _add_noise(self, drop_prob, noise_type):
@@ -46,7 +48,7 @@ class Autoencoder(object):
         if len(obs_dim) < 4:
             t_list += [self.x_hat, self.h_hat]
         else:
-            img_list = [tf.reshape(self.x_hat, obs_dim), self.h_hat]
+            img_list = [tf.reshape(self.x_hat, obs_dim)]
         self._summaries = summary_op(t_list, img_list)
 
     @staticmethod
@@ -174,10 +176,10 @@ class VQVAE(Autoencoder):
             self.x_hat = self._build_decoder(enc=self.z_q, obs_dim=obs_dim, topology=topology, act=act)
 
     def _loss_op(self):
-        self.vq_loss = tf.reduce_mean(tf.norm(tf.stop_gradient(self.h_hat) - self.z_q, axis=-1) ** 2)
-        self.commit_loss = tf.reduce_mean(tf.norm(self.h_hat - tf.stop_gradient(self.z_q), axis=-1) ** 2)
+        self.vq_loss = tf.reduce_mean(tf.norm(tf.stop_gradient(self.h_hat) - self.z_q, axis=-1) ** 2, name = "vq_loss")
+        self.commit_loss = tf.reduce_mean(tf.norm(self.h_hat - tf.stop_gradient(self.z_q), axis=-1) ** 2, name ="commit_loss")
         # elf.neg_log- (tf.log(self.x_hat + 1e-5) - tf.log(1/tf.cast(self.k_dim, tf.float32)))
-        self.recon_loss = tf.reduce_mean(tf.square(self.x_hat - self.x))
+        self.recon_loss = tf.reduce_mean(tf.square(self.x_hat - self.x), name = "recon_loss")
         #
         # should do all dimension [1,2,3]
         # self.recon_loss = - (tf.reduce_mean(tf.log(self.x_hat)) - tf.log(tf.cast(self.z_dim, tf.float32)))
@@ -204,7 +206,7 @@ class VQVAE(Autoencoder):
         self.train_op = self._optim(learning_rate=lr).apply_gradients(
             dec_gvs + enc_gvs + embed_gvs, global_step=self.global_step
         )
-        self._params = [encoder_params, decoder_params, self.e]
+        self._params = self._trainable_variables(self.scope)
 
 
 class AE(Autoencoder):
@@ -231,7 +233,8 @@ class RAE(Autoencoder):
 
     def _train_op(self, lr):
         regularizer = self.kl_divergence(self.sparsity_level, self.h_hat)
-        self.loss = tf.reduce_mean(tf.square(self.x - self.x_hat)) + self.beta * tf.reduce_mean(regularizer)
+        self.regularizer= tf.reduce_mean(regularizer)
+        self.loss = tf.reduce_mean(tf.square(self.x - self.x_hat)) + self.beta * self.regularizer
         self.train_op = self._optim(lr).minimize(self.loss)
         self._params = self._trainable_variables(self.scope)
 
@@ -249,21 +252,6 @@ class DAE(Autoencoder):
         self._loss_op()
         self._train_op(config.lr)
         self._summary_op(t_list=[])
-
-
-def select_ae(ae):
-    if ae == "AE":
-        return AE
-    elif ae == "VAE":
-        return VAE
-    elif ae == "VQVAE":
-        return VQVAE
-    elif ae == "DAE":
-        return DAE
-    elif ae == "RAE":
-        return RAE
-    else:
-        raise NotImplementedError()
 
 
 class SAE(Autoencoder):
@@ -295,3 +283,19 @@ class SAE(Autoencoder):
             self.train_schedule["ae_{}".format(idx)] = {"loss": loss, "train_op": train_op}
 
         self._params = self._trainable_variables(self.scope)
+
+def select_ae(ae):
+    if ae == "AE":
+        return AE
+    elif ae == "VAE":
+        return VAE
+    elif ae == "VQVAE":
+        return VQVAE
+    elif ae == "DAE":
+        return DAE
+    elif ae == "RAE":
+        return RAE
+    else:
+        raise NotImplementedError()
+
+
